@@ -54,6 +54,11 @@ impl Processor {
         // 3rd acc (temporary X account created just for transfer of tokens to the escrow account)
         let token_to_receive_account = next_account_info(account_info_iter)?;
 
+        // Nothing terrible would happen if we didn't add this check. Instead, Bob's
+        // transaction would fail because the Token Program will attempt to send the Y tokens
+        // to Alice but not be the owner of the token_to_receive_account. That said, it seems
+        // more reasonable explicitly specify which transaction failed/led to the invalid state.
+        // spl_token is a crate and it's aka the token program
         if *token_to_receive_account.owner != spl_token::id() {
             return Err(ProgramError::IncorrectProgramId);
         }
@@ -61,7 +66,12 @@ impl Processor {
         // 4th account (escrow account to hold tokens for transfer)
         let escrow_account = next_account_info(account_info_iter)?;
         
-
+        // Most times you want your accounts to be rent-exempt, because if
+        // balances go to zero, they DISAPPEAR (i.e., purged from memory at runtime)!
+        // This is why we're checking whether escrow (state) account is exempt. 
+        // If we didn't do this check, and Alice were to pass in a non-rent-exempt account,
+        // the account balance might go to zero balance before Bob takes the trade.
+        // With the account gone, Alice would have no way to recover her tokens.
         let rent = &Rent::from_account_info(next_account_info(account_info_iter)?)?;
 
         if !rent.is_exempt(escrow_account.lamports(), escrow_account.data_len()) {
@@ -80,6 +90,8 @@ impl Processor {
         escrow_info.initializer_token_to_receive_account_pubkey = *token_to_receive_account.key;
         escrow_info.expected_amount = amount;
 
+        // Serialize our escrow_info object using 'pack' default function, which internally
+        // calls our 'pack_into_slice' function.
         Escrow::pack(escrow_info, &mut escrow_account.data.borrow_mut())?; // `pack` is another default function which internally calls our pack_into_slice function.
 
         // Now, we need to transfer (user space) ownership of the temporary token account to the PDA...
@@ -125,10 +137,10 @@ impl Processor {
 
         msg!("Calling the token program to transfer token account ownership...");
         invoke(
-            &owner_change_ix,                                     // the instruction  
-            &[                                                  // The accounts required by the instruction
-                temp_token_account.clone(),
-                initializer.clone(),
+            &owner_change_ix,                                     // the instruction CPI (Cross-Program Instruction)
+            &[                                                  // The accounts required by the CPI instruction
+                temp_token_account.clone(),                                 // Account of the program we are calling
+                initializer.clone(),                                        
                 token_program.clone(),
             ],
         )?;
@@ -141,7 +153,10 @@ impl Processor {
         amount_expected_by_taker: u64,
         program_id: &Pubkey,
     ) -> ProgramResult {
-        // ----------------------------------------------------------------------------- get all the accounts
+        // This is Bob's Transaction. Alice has already created the Escrow,
+        // so now Bob needs to send the correct amount of Y tokens to the Escrow,
+        // then the Escrow will send him Alice's X tokens and Alice his Y tokens.
+        // -------------------------------get all the accounts---------------------------------------------- //
 
         let account_info_iter = &mut accounts.iter();
 
@@ -198,7 +213,11 @@ impl Processor {
         }
 
         // instruction -> move Y tokens from bob to alice
-
+        // To perform the actual transfer we use spl_token::instruction::transfer built-in
+        // method, which is a CPI. We then will use invoke() to call this new instruction
+        // and pass in this instruction along with the accounts involved.
+        // This is using Signature Extension to make the token transfer to Alice's Y
+        // token account on Bob's behalf.
         let transfer_to_initializer_ix = spl_token::instruction::transfer(
             token_program_acc.key,
             taker_y_acc.key,
@@ -222,7 +241,6 @@ impl Processor {
         )?;
 
         // move X from alice to bob
-
         let transfer_to_taker_ix = spl_token::instruction::transfer(
             token_program_acc.key, //always first
             pda_temp_x_acc.key,
@@ -297,7 +315,7 @@ impl Processor {
         accounts: &[AccountInfo],
         program_id: &Pubkey,
     ) -> ProgramResult {
-        // ----------------------------------------------------------------------------- get accs
+        // ------------------------------------GET ACCOUNTS----------------------------------------- //
         let accounts_info_iter = &mut accounts.iter();
 
         // 1st acc -> Escrow initializer account
@@ -313,7 +331,7 @@ impl Processor {
         // 6th acc -> The PDA account
         let pda_acc = next_account_info(accounts_info_iter)?;
 
-        // ----------------------------------------------------------------------------- checks
+        // -------------------------------------checks-------------------------------------------- //
         // deserialize the escrow account
         let escrow_info = Escrow::unpack(&escrow_acc.data.borrow())?;
 
@@ -332,25 +350,14 @@ impl Processor {
             return Err(ProgramError::InvalidAccountData);
         }
 
-        // ----------------------------------------------------------------------------- pda
+        // -------------------------------THE PDA account------------------------------------------- //
 
         // APPROACH 1: FROM TUTORIAL - works
         let (pda, bump_seed) = Pubkey::find_program_address(&[b"escrow"], program_id);
         // Program log: pda and seed are: 2CVTH6qZCuYWyCPigStv7rTPfaCW9FTmFtzTfq3u8LBU, 254
-        msg!("pda and seed are: {}, {}", pda, bump_seed);
+        msg!("pda and seed: {}, {}", pda, bump_seed);
 
-        // APPROACH 2a: PASS IN SEED DIRECTLY TO SAVE COMPUTATION - works
-        // Program log: passed pda pk is 2CVTH6qZCuYWyCPigStv7rTPfaCW9FTmFtzTfq3u8LBU
-        // msg!("passed pda pk is {}", pda_acc.key);
-        let pda = *pda_acc.key;
-
-        // APPROACH 2b: PASS IN SEED + DERIVE ADDR - didn't work
-        // Program log: pda2 + seed 3XgMWSze8cTg71hCBcErGgfndnf9KFUfmV13EzbiXhDB, 2
-        // let pda2 = Pubkey::create_program_address(&[&b"escrow"[..], &[bump_seed]], program_id)?;
-        // msg!("pda2 + seed {}, {}", pda2, bump_seed);
-
-
-        // ----------------------------------------------------------------------------- send x token back
+        // -------------------------------send x token back----------------------------------------- //
 
         // similarly to our Escrow, pack/unpack turns a slice into an actual account info
         let temp_x_info = TokenAccount::unpack(&temp_x_acc.data.borrow())?;

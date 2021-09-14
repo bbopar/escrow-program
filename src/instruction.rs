@@ -41,12 +41,12 @@ pub enum EscrowInstruction {
         amount: u64,
     },
 
-    // Accounts expected:
-    //
-    //                   The account of the person who initialized the escrow
-    //                   The PDA's temp token account to get tokens from and eventually close
-    //                   token program +
-    //                   PDA account +
+    /// 0 [signer] initializer's main account
+    /// 1 [] The token program
+    /// 2 [writable] temp x account
+    /// 3 [writable] The initializer's x account
+    /// 4 [writable] The escrow account holding the escrow info
+    /// 5 [] The PDA account
     Cancel {},
 }
 

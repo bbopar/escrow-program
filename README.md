@@ -13,3 +13,8 @@ $ cargo test
 $ cargo build-bpf
 $ cargo test-bpf
 ```
+
+### Cancel escrow program - solutions
+PASS IN SEED DIRECTLY TO SAVE COMPUTATION
+
+PASS IN SEED + DERIVE ADDR
